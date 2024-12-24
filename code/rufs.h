@@ -67,7 +67,6 @@ uint8_t get_bitmap(bitmap_t b, int i) {
     return b[i / 8] & (1 << (i & 7)) ? 1 : 0;
 }
 
-// USER DEFINED HELPER FUNCTION:
 int num_of_components(char*, char**);
 
 #endif

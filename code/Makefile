@@ -1,7 +1,7 @@
 CC=gcc
 CFLAGS=-g -Wall -D_FILE_OFFSET_BITS=64
 LDFLAGS=-lfuse
-MOUNTDIR?=/tmp/aa2535/mountdir
+MOUNTDIR?=/tmp/acl176/mountdir
 
 
 RUFS?=rufs.o

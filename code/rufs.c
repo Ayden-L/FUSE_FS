@@ -241,9 +241,6 @@ int dir_find(uint16_t ino, const char *fname, size_t name_len, struct dirent *di
         return EXIT_FAILURE;
     }
 
-    for (int i = 0; i < 16; i++) {
-    }
-
     // Step 2: Get data block of current directory from inode
     for (int i = 0; i < 16; i++) {
         // traverse through the direct_ptr array (NOTE: there are only 16 direct blocks in an inode)
@@ -422,17 +419,6 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
                             return EXIT_FAILURE;
                         }
 
-                        /////////////////////////////////////////////////////
-                        /* TESTING CODE BELOW (to see if data block holds correct data) --> delete later*/
-                        memset(buff_mem, 0, BUFF_MEM_SIZE);
-                        if (bio_read(dir_inode.direct_ptr[i], buff_mem) < 0) {
-                            // free(dir_inode_block);
-                            return EXIT_FAILURE;
-                        }
-                        dirent_t my_dirent;
-                        memset(&my_dirent, 0, sizeof(dirent_t));
-                        memcpy(&my_dirent, buff_mem, sizeof(dirent_t));
-
                         memset(buff_mem, 0, BUFF_MEM_SIZE);
 
                         writei(dir_inode.ino, &dir_inode);
@@ -525,15 +511,83 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
     }
 }
 
-
 int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
-    // Step 1: Read dir_inode's data block and checks each directory entry of dir_inode
+    
+    // Read dir_inode's data block and checks each directory entry of dir_inode
+    int inode_block_num = inode_table_index + (dir_inode.ino / inodes_in_block);
+    int offset_in_block = (dir_inode.ino % inodes_in_block);
+    dirent_t temp_dirent;
 
-    // Step 2: Check if fname exist
+    for (int i = 0; i < NUM_DIRECT_PTRS; i++) {
 
-    // Step 3: If exist, then remove it from dir_inode's data block and write to disk
+        int data_block = dir_inode.direct_ptr[i];
+        if (data_block >= data_block_start) {
 
-    return 0;
+            memset(buff_mem, 0, BUFF_MEM_SIZE);
+            if (bio_read(data_block, buff_mem) < 0) {
+                return -EXIT_FAILURE;
+            }
+
+            // (same traversal method as in dir_find())
+            int max_dirents_in_block = (BLOCK_SIZE / sizeof(dirent_t));  
+            int last = (max_dirents_in_block * sizeof(dirent_t)); 
+            int j = 0;
+            while (j <= last) {
+
+                // copy the dirent at position j in the buffer (which holds the data block), to temp_dirent
+                memset(&temp_dirent, 0, sizeof(dirent_t));
+                memcpy(&temp_dirent, buff_mem + j, sizeof(dirent_t));
+
+                // check to see if the dirent matches
+                if (strcmp(fname, temp_dirent.name) == 0 && name_len == temp_dirent.len) {
+                    // if it does exist, remove it from this data block, then write to disk:
+                    
+                    // memset the target position to 0 (clear it)
+                    memset(buff_mem + j, 0, sizeof(dirent_t));
+
+                    // write the data block back to disk
+                    if (bio_write(data_block, buff_mem) < 0) {
+                        return -EXIT_FAILURE;
+                    }
+
+                    // update the dir_inode stats
+                    memset(buff_mem, 0, BUFF_MEM_SIZE);
+
+                    // read the inode block where dir_inode exists
+                    if (bio_read(inode_block_num, buff_mem) < 0) {
+                        return -EXIT_FAILURE;
+                    }
+
+                    // update directory inode's stats
+                    dir_inode.size              -= sizeof(dirent_t);    // update size to reflect dirent has been removed
+                    dir_inode.direct_ptr[i]     = 0;                    // clear direct pointer
+                    dir_inode.link              -= 1;                   // one less link to the directory (I believe?)
+                    dir_inode.vstat.st_nlink    -= 1;                       
+                    dir_inode.vstat.st_mtime    = time(NULL);           // update modification time
+                    dir_inode.vstat.st_atime    = time(NULL);           // update access time
+                    dir_inode.vstat.st_size     -= sizeof(dirent_t);
+
+                    // // copy this updated local inode to where the inode lives in the inode block
+                    // // NOTE: buff_mem holds the inode block of dir_inode here
+                    // memcpy(buff_mem + (offset_in_block * sizeof(inode_t)), &dir_inode, sizeof(inode_t));
+
+                    // // write this inode block back to disk
+                    // if (bio_write(inode_block_num, buff_mem) < 0) {
+                    //     return -EXIT_FAILURE;
+                    // }
+
+                    // OR: may just be able to do:
+                    if (writei(dir_inode.ino, &dir_inode) != EXIT_SUCCESS) {
+                        return -EXIT_FAILURE;
+                    }
+
+                    return EXIT_SUCCESS;
+                }
+            }
+        }
+    }
+    
+    return -EXIT_FAILURE;
 }
 
 /*
@@ -748,7 +802,7 @@ int rufs_mkfs() {
 /*
  * FUSE file operations
  */
-static void *rufs_init(struct fuse_conn_info *conn) {
+static void *my_init(struct fuse_conn_info *conn) {
     // Step 1a: If disk file is not found, call mkfs
     int disk = dev_open(diskfile_path);
     if (disk == -1) {
@@ -789,7 +843,7 @@ static void *rufs_init(struct fuse_conn_info *conn) {
     return NULL;
 }
 
-static void rufs_destroy(void *userdata) {
+static void my_destroy(void *userdata) {
     // Step 1: De-allocate in-memory data structures
     free(buff_mem);
 
@@ -797,7 +851,7 @@ static void rufs_destroy(void *userdata) {
     dev_close();
 }
 
-static int rufs_getattr(const char *path, struct stat *stbuf) {
+static int my_getattr(const char *path, struct stat *stbuf) {
     // Step 1: call get_node_by_path() to get inode from path
     inode_t path_node;
     int ret = get_node_by_path(path, root_inode, &path_node);  // Adjust root_inode as needed
@@ -821,7 +875,7 @@ static int rufs_getattr(const char *path, struct stat *stbuf) {
     return 0;  // Success
 }
 
-static int rufs_opendir(const char *path, struct fuse_file_info *fi) {
+static int my_opendir(const char *path, struct fuse_file_info *fi) {
     // Step 1: Call get_node_by_path() to get inode from path
 
     // For now we can assume that the path will always be from root? So ino will be 0
@@ -840,7 +894,7 @@ static int rufs_opendir(const char *path, struct fuse_file_info *fi) {
     return 0;
 }
 
-static int rufs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
+static int my_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
     // Step 1: Call get_node_by_path() to get inode from path
 
     inode_t dir_inode;
@@ -888,7 +942,7 @@ static int rufs_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, 
     return 0;
 }
 
-static int rufs_mkdir(const char *path, mode_t mode) {
+static int my_mkdir(const char *path, mode_t mode) {
     // Step 1: Use dirname() and basename() to separate parent directory path and target directory name
 
     char *dirname_copy[strlen(path)];
@@ -953,7 +1007,7 @@ static int rufs_mkdir(const char *path, mode_t mode) {
     return 0;
 }
 
-static int rufs_rmdir(const char *path) {
+static int my_rmdir(const char *path) {
     // Step 1: Use dirname() and basename() to separate parent directory path and target directory name
 
     char *dir_name = dirname(path);
@@ -975,12 +1029,12 @@ static int rufs_rmdir(const char *path) {
     return 0;
 }
 
-static int rufs_releasedir(const char *path, struct fuse_file_info *fi) {
+static int my_releasedir(const char *path, struct fuse_file_info *fi) {
     
     return 0;
 }
 
-static int rufs_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
+static int my_create(const char *path, mode_t mode, struct fuse_file_info *fi) {
     char *dirname_copy[strlen(path)];
     char *basename_copy[strlen(path)];
 
@@ -1038,21 +1092,22 @@ static int rufs_create(const char *path, mode_t mode, struct fuse_file_info *fi)
     return 0;
 }
 
-static int rufs_open(const char *path, struct fuse_file_info *fi) {
-    // Call get_node_by_path() to get inode from path
+static int my_open(const char *path, struct fuse_file_info *fi) {
 
+    // Call get_node_by_path() to get inode from path
     inode_t target_ino;
 
     if (get_node_by_path(path, root_inode, &target_ino) < 0) {  // Did not find ino
 
+        // If not find, return -1
         return -1;
     }
 
-    // If not find, return -1
-    return -1;
+    // if found return 0
+    return 0;
 }
 
-static int rufs_read(const char *path, char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
+static int my_read(const char *path, char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
     // Step 1: You could call get_node_by_path() to get inode from path
 
     inode_t target_ino;
@@ -1120,7 +1175,7 @@ static int rufs_read(const char *path, char *buffer, size_t size, off_t offset, 
         if offset = 0, write the data at the start of the block
         if offset = 2561, write the data starting at this offset
 */
-static int rufs_write(const char *path, const char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
+static int my_write(const char *path, const char *buffer, size_t size, off_t offset, struct fuse_file_info *fi) {
     for (int i = 0; i < size; i++) {
     }
 
@@ -1261,7 +1316,7 @@ static int rufs_write(const char *path, const char *buffer, size_t size, off_t o
     return -1;
 }
 
-static int rufs_unlink(const char *path) {
+static int my_unlink(const char *path) {
     // Step 1: Use dirname() and basename() to separate parent directory path and target file name
 
     // Step 2: Call get_node_by_path() to get inode of target file
@@ -1277,47 +1332,48 @@ static int rufs_unlink(const char *path) {
     return 0;
 }
 
-static int rufs_truncate(const char *path, off_t size) {
+static int my_truncate(const char *path, off_t size) {
     
     return 0;
 }
 
-static int rufs_release(const char *path, struct fuse_file_info *fi) {
+static int my_release(const char *path, struct fuse_file_info *fi) {
     
     return 0;
 }
 
-static int rufs_flush(const char *path, struct fuse_file_info *fi) {
+static int my_flush(const char *path, struct fuse_file_info *fi) {
     
     return 0;
 }
 
-static int rufs_utimens(const char *path, const struct timespec tv[2]) {
+static int my_utimens(const char *path, const struct timespec tv[2]) {
     
     return 0;
 }
 
 static struct fuse_operations rufs_ope = {
-    .init = rufs_init,
-    .destroy = rufs_destroy,
+    .init = my_init,
+    .destroy = my_destroy,
 
-    .getattr = rufs_getattr,
-    .readdir = rufs_readdir,
-    .opendir = rufs_opendir,
-    .releasedir = rufs_releasedir,
-    .mkdir = rufs_mkdir,
-    .rmdir = rufs_rmdir,
+    .getattr = my_getattr,
+    .readdir = my_readdir,
+    .opendir = my_opendir,
+    .releasedir = my_releasedir,
+    .mkdir = my_mkdir,
+    .rmdir = my_rmdir,
 
-    .create = rufs_create,
-    .open = rufs_open,
-    .read = rufs_read,
-    .write = rufs_write,
-    .unlink = rufs_unlink,
+    .create = my_create,
+    .open = my_open,
+    .read = my_read,
+    .write = my_write,
+    .unlink = my_unlink,
 
-    .truncate = rufs_truncate,
-    .flush = rufs_flush,
-    .utimens = rufs_utimens,
-    .release = rufs_release};
+    .truncate = my_truncate,
+    .flush = my_flush,
+    .utimens = my_utimens,
+    .release = my_release
+};
 
 int main(int argc, char *argv[]) {
     int fuse_stat;
@@ -1327,8 +1383,5 @@ int main(int argc, char *argv[]) {
 
     fuse_stat = fuse_main(argc, argv, &rufs_ope, NULL);
 
-    // Add print statement to confirm RUFS active?
-
     return fuse_stat;
-    // exit(EXIT_SUCCESS);
 }
