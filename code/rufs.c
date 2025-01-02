@@ -513,6 +513,8 @@ int dir_add(struct inode dir_inode, uint16_t f_ino, const char *fname, size_t na
 
 int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
     
+    printf("***********dir_remove() START\n");
+
     // Read dir_inode's data block and checks each directory entry of dir_inode
     int inode_block_num = inode_table_index + (dir_inode.ino / inodes_in_block);
     int offset_in_block = (dir_inode.ino % inodes_in_block);
@@ -523,10 +525,14 @@ int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
         int data_block = dir_inode.direct_ptr[i];
         if (data_block >= data_block_start) {
 
+            printf("***********dir_remove() found valid data block: %d\n", data_block);
+
             memset(buff_mem, 0, BUFF_MEM_SIZE);
             if (bio_read(data_block, buff_mem) < 0) {
                 return -EXIT_FAILURE;
             }
+
+            printf("***********dir_remove() read valid data block into buff_mem\n");
 
             // (same traversal method as in dir_find())
             int max_dirents_in_block = (BLOCK_SIZE / sizeof(dirent_t));  
@@ -540,6 +546,9 @@ int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
 
                 // check to see if the dirent matches
                 if (strcmp(fname, temp_dirent.name) == 0 && name_len == temp_dirent.len) {
+
+                    printf("***********dir_remove() target fname: %s, current fname: %s\n", fname, temp_dirent.name);
+
                     // if it does exist, remove it from this data block, then write to disk:
                     
                     // memset the target position to 0 (clear it)
@@ -581,12 +590,14 @@ int dir_remove(struct inode dir_inode, const char *fname, size_t name_len) {
                         return -EXIT_FAILURE;
                     }
 
+                    printf("***********dir_remove() RETURN SUCCESS\n");
+
                     return EXIT_SUCCESS;
                 }
             }
         }
     }
-    
+    printf("***********dir_remove() RETURN FAILURE\n");
     return -EXIT_FAILURE;
 }
 
@@ -895,11 +906,15 @@ static int my_opendir(const char *path, struct fuse_file_info *fi) {
 }
 
 static int my_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, off_t offset, struct fuse_file_info *fi) {
-    // Step 1: Call get_node_by_path() to get inode from path
 
+    printf("***************my_readdir() START\n");
+
+    // Call get_node_by_path() to get inode from path
     inode_t dir_inode;
 
+    printf("***************my_readdir() calling get_node_by_path()\n");
     int get_node_result = get_node_by_path(path, root_inode, &dir_inode);
+    printf("***************my_readdir() returned from get_node_by_path()\n");
 
     if (get_node_result == EXIT_FAILURE) {
         return EXIT_FAILURE;
@@ -908,33 +923,49 @@ static int my_readdir(const char *path, void *buffer, fuse_fill_dir_t filler, of
     // Instantiate buffer
     dirent_t all_dirents[dir_inode.link];
     dirent_t current_dirent;
+    printf("***************my_readdir() dir_inode.link = %d\n", dir_inode.link);
 
+    /* special case for empty root dir: */
+    if (dir_inode.link == 2 && dir_inode.ino == root_inode) {
+        printf("***************my_readdir() found root node with only two links (empty)\n");
+        return 0;
+    }
+
+
+    printf("***************my_readdir() traversing direct pointers of dir_inode.ino\n");
     for (int i = 0; i < NUM_DIRECT_PTRS; i++) {
-        if (dir_inode.direct_ptr[i] >= data_block_start) {  // Check if valid
+
+        int data_block = dir_inode.direct_ptr[i];
+        if (data_block >= data_block_start) {  // Check if valid
+            printf("***************my_readdir() found valid data block num: %d\n", data_block);
 
             memset(buff_mem, 0, BUFF_MEM_SIZE);
-            if (bio_read(dir_inode.direct_ptr[i], buff_mem) < 0) {
+            if (bio_read(data_block, buff_mem) < 0) {
                 return EXIT_FAILURE;
             }
+            printf("***************my_readdir() read data block %d into buff_mem\n", data_block);
 
             int last = MAX_DIRENTS_IN_BLOCK * sizeof(dirent_t);
 
+            printf("***************my_readdir() reading dirent positions of data block %d\n", data_block);
             // Step 2: Read directory entries from its data blocks, and copy them to filler
             for (int j = 0; j <= last; j += sizeof(dirent_t)) {
-                // do something more sophisticated but for now just directly copying the data
-                memcpy(&all_dirents[j % sizeof(dirent_t)], buff_mem + j, sizeof(dirent_t));
+                
 
+                memcpy(&all_dirents[j % sizeof(dirent_t)], buff_mem + j, sizeof(dirent_t));
                 dirent_t temp_dirent;
                 memset(&temp_dirent, 0, sizeof(dirent_t));
                 memcpy(&temp_dirent, buff_mem + j, sizeof(dirent_t));
 
-                if (temp_dirent.len == 0) {
-                    return EXIT_SUCCESS;
+                printf("***************my_readdir() temp_dirent.name: %s, temp_dirent.ino: %d\n", temp_dirent.name, temp_dirent.ino);
+
+                // if we found a none empty dirent add to buffer
+                if (temp_dirent.len != 0) {
+                    filler(buffer, all_dirents[j % sizeof(dirent_t)].name, NULL, offset);  
                 }
 
-                // offset += offset;
-                // filler(buffer, all_dirents[j % sizeof(dirent_t)].name, NULL, offset + sizeof(dirent_t));
-                filler(buffer, all_dirents[j % sizeof(dirent_t)].name, NULL, offset);  // maybe
+                // filler(buffer, &temp_dirent.name, NULL, offset);
+
             }
         }
     }
@@ -1008,23 +1039,39 @@ static int my_mkdir(const char *path, mode_t mode) {
 }
 
 static int my_rmdir(const char *path) {
+
     // Step 1: Use dirname() and basename() to separate parent directory path and target directory name
-
     char *dir_name = dirname(path);
-    char *path_name = basename(path);
-
-    // Step 2: Call get_node_by_path() to get inode of target directory
+    char *base_name = basename(path);
 
     inode_t parent_dir_node;
+    inode_t target_dir;
 
-    get_node_by_path(dir_name, root_inode, &parent_dir_node);
+    // Step 2: Call get_node_by_path() to get inode of target directory
+    if (get_node_by_path(base_name, root_inode, &target_dir) == EXIT_FAILURE) {
+        return -EXIT_FAILURE;
+    }
+
     // Step 3: Clear data block bitmap of target directory
+    for (int i = 0; i < NUM_DIRECT_PTRS; i++) {
+        int data_block = target_dir.direct_ptr[i];
+        if (data_block >= data_block_start) {
+            // if direct pointer points to a valid data block, clear its bit in the bitmap
+            // this allows that data block to be overwritten with fresh data
+            unset_bitmap(&d_bitmap, data_block);
+        }
+    }
 
     // Step 4: Clear inode bitmap and its data block
+    unset_bitmap(&i_bitmap, target_dir.ino);
 
     // Step 5: Call get_node_by_path() to get inode of parent directory
+    if (get_node_by_path(dir_name, root_inode, &parent_dir_node) == EXIT_FAILURE) {
+        return -EXIT_FAILURE;
+    }
 
     // Step 6: Call dir_remove() to remove directory entry of target directory in its parent directory
+    dir_remove(&parent_dir_node, base_name, strlen(base_name));
 
     return 0;
 }
